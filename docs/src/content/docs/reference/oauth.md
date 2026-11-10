@@ -86,9 +86,11 @@ Origin allowlists alone do not provide network isolation.
 | Discovery limit               | Value                                     |
 | ----------------------------- | ----------------------------------------- |
 | Metadata / JWKS body          | 5 KiB / 128 KiB                           |
-| Request timeout / concurrency | 5 seconds / 8 requests per server Layer   |
+| Request timeout / concurrency | 5 seconds / 8 slots per server Layer      |
 | Cache lifetime / entries      | At most 5 minutes / 256 entries per cache |
 
+Discovery slots become available at their five-second deadline even if an abandoned
+request never runs its cleanup. Applications still own ingress rate limits.
 Errors and private or non-cacheable responses are not cached. Metadata changes take
 effect when cached entries expire and can invalidate outstanding grants.
 

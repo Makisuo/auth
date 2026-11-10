@@ -100,11 +100,10 @@ Effect SQL applications supply their own migration runner.
 The composed Layer validates mapped columns and unique keys on its first storage
 operation. Its configured SQL client's connection acquirer can read services from
 the invoking request during initialization and subsequent operations. Build
-persistence in the same scope as its SQL client and rebuild it after schema changes
-or failed initialization. Canceling one caller leaves setup
-running for other waiting callers. Interrupted setup requires rebuilding the Layer
-before storage operations resume. Cookie-cached and anonymous session reads do
-not trigger initialization.
+persistence in the same scope as its SQL client and rebuild it after schema changes.
+Until setup succeeds, each storage operation runs it for itself, so a failed,
+interrupted or abandoned attempt never blocks the next. Cookie-cached and anonymous
+session reads do not trigger initialization.
 
 Composition supports password sign-in, registration and management, email codes,
 magic links and address management, phone sign-in and enabled lifecycle operations,
@@ -362,7 +361,7 @@ keys can coexist with text subject references; use the same lowercase UUID spell
 throughout. Logical column types describe driver values, not migration DDL.
 Permit database catalog reads: explicit session factories validate required keys and
 column compatibility at acquisition; composed storage and direct OAuth factories
-validate on their first operation.
+validate on each operation until validation succeeds.
 Schema declarations do not install constraints. Apply migrations before use and
 reacquire persistence Layers after schema changes.
 

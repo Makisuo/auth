@@ -750,6 +750,65 @@ it.effect("CIMD cancels a stalled metadata request at its deadline", () =>
   ),
 );
 
+// 21bb21d removed the eight-fetch bound. Issue #298 requires recovery even when
+// an abandoned request's I/O and timer callbacks never finish.
+it.effect("CIMD bounds discovery and reclaims abandoned slots at their deadline", () => {
+  let calls = 0;
+  let stalled = true;
+
+  return Effect.gen(function* () {
+    const service = yield* server.Service;
+    const clock = yield* Clock.Clock;
+
+    const start = Effect.forEach(Array.from({ length: 8 }), () =>
+      Effect.forkChild(
+        service
+          .handle(begin())
+          .pipe(Effect.provideService(Clock.Clock, { ...clock, sleep: () => Effect.never })),
+      ),
+    );
+
+    const abandoned = yield* start;
+
+    while (calls < 8) yield* Effect.yieldNow;
+    stalled = false;
+    expect((yield* service.handle(begin())).status).toBe(503);
+    expect(calls).toBe(8);
+
+    yield* TestClock.adjust("5 seconds");
+    stalled = true;
+    const replacements = yield* start;
+
+    while (calls < 16) yield* Effect.yieldNow;
+    yield* Fiber.interruptAll(abandoned);
+    stalled = false;
+    expect((yield* service.handle(begin())).status).toBe(503);
+    expect(calls).toBe(16);
+
+    yield* Fiber.interruptAll(replacements);
+    for (let index = 0; index < 9; index++)
+      expect((yield* service.handle(begin())).status).toBe(303);
+    expect(calls).toBe(25);
+  }).pipe(
+    Effect.provide(
+      harness(
+        undefined,
+        metadataConfig,
+        Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            calls++;
+
+            return stalled
+              ? Effect.never
+              : Effect.sync(() => HttpClientResponse.fromWeb(request, Response.json(metadata)));
+          }),
+        ),
+      ),
+    ),
+  );
+});
+
 it.effect("OAuth 2.1 permits an omitted sole callback and token redirect_uri", () =>
   Effect.gen(function* () {
     const flow = yield* authorize("alice", "read", { redirect_uri: "" });
