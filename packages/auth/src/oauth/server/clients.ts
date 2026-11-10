@@ -15,7 +15,6 @@ import * as Jwt from "effect/jose/Jwt";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
-import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { timeoutOrElseWithCause } from "../../internal/timeout";
@@ -186,6 +185,8 @@ interface Cached<A> {
   readonly expires: number;
 }
 
+const discoveryTimeoutMillis = 5_000;
+
 const remember = <A>(cache: Map<string, Cached<A>>, id: string, entry: Cached<A>) => {
   if (cache.size >= 256) {
     const oldest = cache.keys().next().value;
@@ -234,7 +235,7 @@ export const makeClients = Effect.fnUntraced(function* (
   const hmac = yield* Mac.Mac;
   const signatures = yield* Signature.Signature;
   const store = yield* Persistence;
-  const permits = yield* Semaphore.make(8);
+  const permits = new Set<{ readonly expires: bigint }>();
   const cache = new Map<string, Cached<Client>>();
   const keyCache = new Map<string, Cached<Jwks.Jwks["Service"]>>();
   const localResolvers = new WeakMap<Jwks.KeySet, Jwks.Jwks["Service"]>();
@@ -275,6 +276,22 @@ export const makeClients = Effect.fnUntraced(function* (
   // owns key selection and cryptography after this untrusted discovery boundary.
   const fetchJson = Effect.fnUntraced(
     function* (url: string, maximum: number) {
+      yield* Effect.acquireRelease(
+        Effect.gen(function* () {
+          const now = yield* Clock.monotonicTimeNanos;
+
+          // Reclaim on admission: an abandoned Worker's timers and finalizers may
+          // never run. Each permit has its own identity so late cleanup is harmless.
+          for (const permit of permits) if (permit.expires <= now) permits.delete(permit);
+          if (permits.size >= 8) return yield* Unavailable.make({});
+          const permit = { expires: now + BigInt(discoveryTimeoutMillis) * 1_000_000n };
+
+          permits.add(permit);
+
+          return permit;
+        }),
+        (permit) => Effect.sync(() => permits.delete(permit)),
+      );
       const response = yield* http.get(url, { headers: { accept: "application/json" } });
 
       if (response.status !== 200 || (response.url !== "" && response.url !== new URL(url).href))
@@ -315,9 +332,10 @@ export const makeClients = Effect.fnUntraced(function* (
         ),
       ),
     ),
-    timeoutOrElseWithCause({ duration: "5 seconds", orElse: () => Unavailable.make({}) }),
-    permits.withPermitsIfAvailable(1),
-    Effect.flatMap(Option.match({ onNone: () => Unavailable.make({}), onSome: Effect.succeed })),
+    timeoutOrElseWithCause({
+      duration: discoveryTimeoutMillis,
+      orElse: () => Unavailable.make({}),
+    }),
   );
 
   const fetch = Effect.fnUntraced(function* (id: string) {
@@ -394,7 +412,7 @@ export const makeClients = Effect.fnUntraced(function* (
 
       if (client.clientSecret !== undefined) return yield* Unavailable.make({});
       // Grants bind the exact ID, so a case-folding or padding lookup must not alias it.
-      // Registrant-chosen key hosts must not hold the shared discovery permits.
+      // Stored clients use inline keys; registrants never choose a host to fetch.
       if (client.clientId !== id || client.clientAssertion?.jwksUri !== undefined)
         return yield* reject("invalid_client");
 
