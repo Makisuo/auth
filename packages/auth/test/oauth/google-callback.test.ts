@@ -63,6 +63,9 @@ const discovery = HttpClient.make((request, url) =>
   ),
 );
 
+const Failure = Schema.Struct({ reason: Schema.String });
+
+// Regression for https://github.com/yielded-dev/auth/issues/289.
 it.effect("admits the parameters Google appends to its callback", () =>
   Effect.gen(function* () {
     const { handler, dispose } = HttpRouter.toWebHandler(
@@ -88,15 +91,16 @@ it.effect("admits the parameters Google appends to its callback", () =>
     yield* Effect.addFinalizer(() => Effect.promise(dispose));
 
     const reason = (query: Record<string, string>) =>
-      Effect.promise(async () => {
-        const response = await handler(
+      Effect.promise(() =>
+        handler(
           new Request(`${origin}/auth/google/callback?${new URLSearchParams(query)}`, {
             headers: { cookie: "__Host-effect-auth-request-binding=unbound" },
           }),
-        );
-
-        return ((await response.json()) as { readonly reason?: string }).reason;
-      });
+        ).then((response) => response.json()),
+      ).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(Failure)),
+        Effect.map((failure) => failure.reason),
+      );
 
     const response = { state: "A".repeat(43), code: "code", iss: "https://accounts.google.com" };
 
