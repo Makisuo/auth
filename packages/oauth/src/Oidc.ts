@@ -48,6 +48,10 @@ export interface DiscoverOptions extends RequestOptions {
 export interface VerifierOptions extends RequestOptions {
   readonly metadata: Metadata;
   readonly clientId: string;
+  /** Accepted ID-token audiences, for one relying party known by several client
+   * IDs, such as an app per platform. A token's `aud` must contain one of them, and
+   * a present `azp` must be one of them. Defaults to `[clientId]`. */
+  readonly audiences?: ReadonlyArray<string>;
   /** Algorithms this verifier will accept. Discovery must advertise at least one.
    * Defaults to RS256, PS256, ES256 and EdDSA. HS256 is accepted only when
    * requested here and a client secret is supplied. */
@@ -94,6 +98,9 @@ export interface Verifier {
 const Configuration = Schema.Struct({
   metadata: Metadata,
   clientId: V.text(1024),
+  audiences: Schema.optionalKey(
+    Schema.Array(V.text(1024)).check(Schema.isMinLength(1), Schema.isMaxLength(64)),
+  ),
   ...V.RequestOptions.fields,
   algorithms: Schema.optionalKey(
     Schema.Array(IdTokenAlgorithm).check(Schema.isMinLength(1), Schema.isMaxLength(5)),
@@ -357,6 +364,7 @@ export const makeVerifier = Effect.fnUntraced(function* (
   const options = yield* V.configuration(Configuration, input, "metadata");
 
   const metadata = V.freeze(options.metadata);
+  const audiences = V.freeze([...(options.audiences ?? [options.clientId])]);
 
   const algorithms = idTokenAlgorithms.filter((algorithm) =>
     (options.algorithms ?? defaultIdTokenAlgorithms).includes(algorithm),
@@ -427,7 +435,7 @@ export const makeVerifier = Effect.fnUntraced(function* (
 
     const jwtPolicy = {
       ...(tenantTemplate ? {} : { issuer: metadata.issuer }),
-      audience: options.clientId,
+      audience: audiences,
       requiredClaims: ["iss", "sub", "aud", "exp", "iat"] as const,
       clockTolerance: 0,
     };
@@ -499,7 +507,7 @@ export const makeVerifier = Effect.fnUntraced(function* (
     if (
       start < 0 ||
       start > now * 1000 ||
-      (claims.azp !== undefined && claims.azp !== options.clientId) ||
+      (claims.azp !== undefined && !audiences.includes(claims.azp)) ||
       claims.exp <= now ||
       claims.iat > now ||
       (claims.nbf !== undefined && claims.nbf > now) ||

@@ -93,6 +93,87 @@ continuation sealed at the authenticated begin, then still require that subject
 and the binding. Query callbacks still require the live session. HTTPS is
 required, because `SameSite=None` is invalid without `Secure`.
 
+## Native apps
+
+iOS and macOS apps sign in with `ASAuthorizationController` instead of a browser.
+List their bundle IDs in a `kind: "native"` registration. It needs no key, so a
+server without browser sign-in can omit the Services ID registration:
+
+```ts
+Apple.provider({
+  registrations: [
+    { clientId: servicesId, teamId, keyId, privateKey },
+    { kind: "native", bundleIds: ["com.example.ios", "com.example.mac"] },
+  ],
+});
+```
+
+Apple scopes `sub` to your developer team. List only apps from the team that owns
+the Services ID so one person keeps one identity across platforms. Never list Expo
+Go's bundle ID: its tokens belong to Expo's team.
+
+Add `AuthContract.oauthNativeSignIn()` and `AuthContract.oauthCompleteNativeSignIn(sessions)`
+to the contract and configure [native credential headers](../reference/http#native-clients).
+A contract without `oauthCompleteSignIn` mounts no browser callback.
+
+1. `nativeSignIn({ provider: "apple", returnTarget: "/" })` returns `flowId` and
+   `nonce`, and issues a request binding in a private header.
+2. Pass `nonce` unchanged to Apple's request. Do not hash it.
+3. Call `completeNativeSignIn` with the `flowId`, the credential's `identityToken`
+   as `idToken`, its `authorizationCode` as `code`, and on first consent
+   `name: { givenName, familyName }`.
+
+The server verifies the token's signature, issuer, audience, expiry, nonce, and
+`c_hash`. It never redeems the code or calls Apple's token endpoint. Results,
+registration, and sessions match the web flow. Do not retry a failed or
+interrupted completion; start a new flow.
+
+In Expo, run a development build with `expo-apple-authentication`. Give a
+[native-mode client](../reference/client#client-options) the `BrowserLogin.Vault`
+from `@yielded/auth-react-native/BrowserLogin`, then compose the steps:
+
+```ts
+const client = yield* AppClient;
+const begin = yield* client.auth.nativeSignIn({ provider: "apple", returnTarget: "/" });
+const apple = yield* Effect.tryPromise(() =>
+  AppleAuthentication.signInAsync({
+    nonce: Redacted.value(begin.nonce),
+    requestedScopes: [AppleAuthentication.AppleAuthenticationScope.FULL_NAME],
+  }),
+);
+const given = apple.fullName?.givenName;
+const family = apple.fullName?.familyName;
+
+return yield* client.auth.completeNativeSignIn({
+  flowId: begin.flowId,
+  provider: "apple",
+  idToken: apple.identityToken ?? "",
+  code: apple.authorizationCode ?? "",
+  name: { ...(given ? { givenName: given } : {}), ...(family ? { familyName: family } : {}) },
+});
+```
+
+In Swift, send the same payload over HTTP with the native headers:
+
+```swift
+let request = ASAuthorizationAppleIDProvider().createRequest()
+request.requestedScopes = [.fullName, .email]
+request.nonce = begin.nonce
+
+// In authorizationController(controller:didCompleteWithAuthorization:)
+let payload: [String: Any] = [
+  "flowId": begin.flowId,
+  "provider": "apple",
+  "idToken": String(decoding: credential.identityToken!, as: UTF8.self),
+  "code": String(decoding: credential.authorizationCode!, as: UTF8.self),
+  "name": ["givenName": credential.fullName?.givenName, "familyName": credential.fullName?.familyName]
+    .compactMapValues { $0 },
+]
+```
+
+The preset retains no Apple refresh token, so it cannot revoke Apple authorization
+when an account is deleted.
+
 ## Run the example
 
 The [Apple application](https://github.com/yielded-dev/auth/blob/main/examples/auth/src/apple-app.ts)
